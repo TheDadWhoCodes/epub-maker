@@ -39,22 +39,40 @@ def extract_article_content(url):
 def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
     """Uses Gemini 2.5 Flash to generate a structured chapter layout with an executive summary."""
     client = genai.Client(api_key=api_key)
+    
+    # 1. Truncate text cleanly before inserting into the string template
+    truncated_text = text[:8000] if text else ""
+    
+    # 2. Build the prompt without inline comments
     prompt = f"""
     You are an expert editor formatting web content into a published eBook chapter.
     
     Article Title: {title}
     Article Content:
-    {text[:8000]}  # Truncate if exceptionally long
+    {truncated_text}
     
     Please output clean HTML format for an EPUB chapter containing:
     1. An 'Executive Summary' box at the top (2-3 bullet points).
     2. Clean, well-structured article text broken into logical HTML section headings (<h2>, <p>).
+    Return ONLY the raw HTML body content without top-level ```html codeblock wrappers.
     """
+    
     response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
+        model="gemini-2.5-flash",
         contents=prompt
     )
-    return response.text
+    
+    content = response.text or ""
+    
+    # 3. Clean any markdown codeblock fences Gemini returns
+    if content.startswith("```html"):
+        content = content[7:]
+    if content.startswith("```"):
+        content = content[3:]
+    if content.endswith("```"):
+        content = content[:-3]
+        
+    return content.strip()
 
 def build_epub(title: str, articles: list, cover_b64: str = None, output_path: str = "book.epub"):
     """Compiles extracted chapters into a valid EPUB document."""
@@ -72,12 +90,18 @@ def build_epub(title: str, articles: list, cover_b64: str = None, output_path: s
         book.set_cover("cover.jpg", image_data)
 
     # Process each article URL
-    for i, item in enumerate(articles):
-        raw_data = extract_article_content(item)
-        chapter_html = summarize_and_format_chapter(raw_data["title"], raw_data["content"], api_key)
-        
-        c = epub.EpubHtml(title=raw_data["title"], file_name=f"chap_{i+1}.xhtml", lang="en")
-        c.content = f"<h1>{raw_data['title']}</h1>{chapter_html}"
+    for i, url in enumerate(articles):
+        article_title, article_text = extract_article_content(url)
+
+        if not article_text:
+            print(f"⚠️ Warning: Could not extract content for {url}. Skipping...")
+            continue
+
+        chapter_html = summarize_and_format_chapter(article_title, article_text, api_key)
+
+        # Create EPUB chapter using article_title
+        c = epub.EpubHtml(title=article_title, file_name=f"chap_{i+1}.xhtml", lang="en")
+        c.content = f"<h1>{article_title}</h1>{chapter_html}"
         book.add_item(c)
         chapters.append(c)
 
@@ -100,7 +124,7 @@ if __name__ == "__main__":
 
     title = payload.get("title", "My Web Digest")
     urls = payload.get("urls", [])
-    cover_b64 = payload.get("cover_base64")
+    cover_b64 = payload.get("cover_b64")
 
     if not urls:
         print("❌ No URLs provided in payload.")
