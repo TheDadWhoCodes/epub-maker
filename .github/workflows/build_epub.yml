@@ -19,8 +19,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install google-genai ebooklib trafilatura requests python-dotenv
-
+          pip install google-genai ebooklib trafilatura requests beautifulsoup4
       - name: Compile EPUB
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
