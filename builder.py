@@ -4,11 +4,14 @@ import json
 import base64
 import requests
 import trafilatura
-from dotenv import load_dotenv
 from google import genai
 from ebooklib import epub
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 def extract_article_content(url: str) -> dict:
     """Extracts clean main body text and title from web article URL."""
