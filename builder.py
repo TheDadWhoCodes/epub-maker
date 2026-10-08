@@ -13,16 +13,28 @@ try:
 except ImportError:
     pass
 
-def extract_article_content(url: str) -> dict:
-    """Extracts clean main body text and title from web article URL."""
+def extract_article_content(url):
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
-        return {"title": "Untitled Article", "content": f"Failed to fetch content from {url}"}
+        return None, None
     
-    content = trafilatura.extract(downloaded)
+    # 1. Try trafilatura with high recall (gets more text)
+    text = trafilatura.extract(
+        downloaded, 
+        favor_recall=True,      # Include more text content
+        include_tables=True,    # Don't strip tables
+        include_comments=False
+    )
+    
+    # 2. Fallback: If trafilatura returned under 200 characters, use baseline fallback
+    if not text or len(text.strip()) < 200:
+        from trafilatura import baseline
+        _, text, _ = baseline(downloaded)
+        
     metadata = trafilatura.extract_metadata(downloaded)
     title = metadata.title if metadata and metadata.title else "Untitled Article"
-    return {"title": title, "content": content or ""}
+    
+    return title, text
 
 def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
     """Uses Gemini 2.5 Flash to generate a structured chapter layout with an executive summary."""

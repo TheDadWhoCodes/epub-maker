@@ -3,100 +3,263 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Web-to-EPUB Converter</title>
+  <title>eBook Generator</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-    h1 { font-size: 1.5rem; color: #111; }
-    label { font-weight: 600; display: block; margin-top: 1rem; }
-    textarea, input[type="text"], input[type="file"], button { width: 100%; padding: 0.75rem; margin-top: 0.5rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; }
-    button { background: #0066cc; color: white; font-weight: bold; border: none; cursor: pointer; margin-top: 1.5rem; }
-    button:hover { background: #0052a3; }
-    #status { margin-top: 1rem; padding: 1rem; display: none; border-radius: 6px; }
-    .success { background: #e6fffa; color: #047857; }
-    .error { background: #fef2f2; color: #b91c1c; }
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      padding: 2rem 1rem;
+      min-height: 100vh;
+    }
+    .container {
+      width: 100%;
+      max-width: 650px;
+      background: var(--card-bg);
+      padding: 2rem;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+    h1 { font-size: 1.75rem; margin-bottom: 0.5rem; color: var(--accent); }
+    p.subtitle { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+    .form-group { margin-bottom: 1.25rem; }
+    label { display: block; font-weight: 600; margin-bottom: 0.5rem; font-size: 0.9rem; }
+    input[type="text"], input[type="password"], textarea {
+      width: 100%;
+      padding: 0.75rem;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    textarea { height: 120px; resize: vertical; }
+    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    .help-text { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.3rem; }
+    button {
+      width: 100%;
+      padding: 0.85rem;
+      background: var(--accent);
+      color: #0f172a;
+      font-weight: 700;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: background 0.2s;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { background: var(--border); cursor: not-allowed; opacity: 0.7; }
+    
+    #status-box {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      border-radius: 6px;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      display: none;
+      text-align: center;
+      line-height: 1.5;
+    }
+    .download-btn {
+      display: inline-block;
+      margin-top: 0.75rem;
+      padding: 0.6rem 1.2rem;
+      background: #22c55e;
+      color: #0f172a;
+      font-weight: 700;
+      text-decoration: none;
+      border-radius: 6px;
+    }
+    .download-btn:hover { background: #16a34a; }
   </style>
 </head>
 <body>
-  <h1>📚 Web-to-EPUB Generator</h1>
+
+<div class="container">
+  <h1>📚 eBook Generator</h1>
+  <p class="subtitle">Compile web articles into an EPUB file via GitHub Actions</p>
+
   <form id="epub-form">
-    <label for="book-title">eBook Title (Optional):</label>
-    <input type="text" id="book-title" placeholder="Leave blank to let Gemini auto-generate">
+    <div class="form-group">
+      <label for="owner-repo">GitHub Repo (username/repo-name)</label>
+      <input type="text" id="owner-repo" placeholder="e.g. edmundchan/epub-maker" required />
+    </div>
 
-    <label for="article-urls">Article URLs (One per line):</label>
-    <textarea id="article-urls" rows="5" placeholder="https://example.com/article-1&#10;https://example.com/article-2" required></textarea>
+    <div class="form-group">
+      <label for="pat-token">Personal Access Token (PAT)</label>
+      <input type="password" id="pat-token" placeholder="github_pat_..." required />
+      <div class="help-text">Requires Fine-Grained PAT with Actions & Contents (Read/Write) access.</div>
+    </div>
 
-    <label for="cover-image">Book Cover Image:</label>
-    <input type="file" id="cover-image" accept="image/*">
+    <div class="form-group">
+      <label for="book-title">eBook Title</label>
+      <input type="text" id="book-title" placeholder="My Daily Digest" value="Web Articles Digest" required />
+    </div>
 
-    <label for="pat-token">GitHub Personal Access Token (PAT):</label>
-    <input type="password" id="pat-token" placeholder="ghp_xxxxxxxxxxxx" required>
+    <div class="form-group">
+      <label for="article-urls">Article URLs (One per line)</label>
+      <textarea id="article-urls" placeholder="https://example.com/article1&#10;https://example.com/article2" required></textarea>
+    </div>
+
+    <div class="form-group">
+      <label for="cover-file">Cover Image (Optional)</label>
+      <input type="file" id="cover-file" accept="image/*" />
+    </div>
 
     <button type="submit" id="submit-btn">🚀 Generate & Compile EPUB</button>
   </form>
 
-  <div id="status"></div>
+  <div id="status-box"></div>
+</div>
 
-  <script>
-    document.getElementById('epub-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const statusDiv = document.getElementById('status');
-      const submitBtn = document.getElementById('submit-btn');
-      
-      const title = document.getElementById('book-title').value;
-      const urls = document.getElementById('article-urls').value.split('\n').filter(u => u.trim() !== '');
-      const token = document.getElementById('pat-token').value;
-      const coverFile = document.getElementById('cover-image').files[0];
+<script>
+  // Save credentials locally in browser storage so you don't re-type them
+  document.addEventListener("DOMContentLoaded", () => {
+    if (localStorage.getItem("epub_repo")) document.getElementById("owner-repo").value = localStorage.getItem("epub_repo");
+    if (localStorage.getItem("epub_pat")) document.getElementById("pat-token").value = localStorage.getItem("epub_pat");
+  });
 
-      submitBtn.disabled = true;
-      submitBtn.innerText = "Encoding & Sending...";
+  document.getElementById("epub-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
 
-      let coverBase64 = null;
-      if (coverFile) {
-        coverBase64 = await new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result.split(',')[1]);
-          reader.readAsDataURL(coverFile);
-        });
+    const repoInput = document.getElementById("owner-repo").value.trim();
+    const patToken = document.getElementById("pat-token").value.trim();
+    const title = document.getElementById("book-title").value.trim();
+    const urlsText = document.getElementById("article-urls").value;
+    const coverInput = document.getElementById("cover-file");
+
+    const urls = urlsText.split("\n").map(u => u.trim()).filter(u => u.length > 0);
+    
+    if (urls.length === 0) {
+      alert("Please enter at least one article URL.");
+      return;
+    }
+
+    // Cache repo and PAT locally
+    localStorage.setItem("epub_repo", repoInput);
+    localStorage.setItem("epub_pat", patToken);
+
+    const [owner, repo] = repoInput.split("/");
+    if (!owner || !repo) {
+      alert("Please enter repository in owner/repo format (e.g. edmundchan/epub-maker)");
+      return;
+    }
+
+    const submitBtn = document.getElementById("submit-btn");
+    const statusBox = document.getElementById("status-box");
+    
+    submitBtn.disabled = true;
+    statusBox.style.display = "block";
+    statusBox.innerHTML = "⏳ Converting cover image & initializing payload...";
+
+    let coverBase64 = "";
+    if (coverInput.files && coverInput.files[0]) {
+      coverBase64 = await fileToBase64(coverInput.files[0]);
+    }
+
+    statusBox.innerHTML = "⚡ Triggering GitHub Actions workflow...";
+
+    try {
+      // 1. Dispatch GitHub Action event
+      const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/dispatches`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${patToken}`,
+          "Accept": "application/vnd.github+json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          event_type: "generate_epub",
+          client_payload: {
+            title: title,
+            urls: urls,
+            cover_b64: coverBase64
+          }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`GitHub API Error (${response.status}): Check your repo path or PAT permissions.`);
       }
 
-      // Payload sent to GitHub Actions trigger
-      const payload = {
-        event_type: "generate_epub",
-        client_payload: {
-          title: title,
-          urls: urls,
-          cover_base64: coverBase64
-        }
-      };
+      statusBox.innerHTML = "🔄 Workflow triggered! Polling for completion (~30–60s)...";
 
+      // 2. Poll for completion
+      pollWorkflowRun(owner, repo, patToken, submitBtn, statusBox);
+
+    } catch (err) {
+      statusBox.innerHTML = `❌ <strong>Error:</strong> ${err.message}`;
+      submitBtn.disabled = false;
+    }
+  });
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]); // Strip data URL prefix
+      reader.onerror = error => reject(error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function pollWorkflowRun(owner, repo, patToken, submitBtn, statusBox) {
+    let attempts = 0;
+    const maxAttempts = 36; // Poll for up to 3 minutes (36 * 5s)
+
+    const interval = setInterval(async () => {
+      attempts++;
       try {
-        // REPLACE WITH YOUR GITHUB USERNAME AND REPO NAME
-        const response = await fetch('https://api.github.com/repos/thedadwhocodes/epub-maker/dispatches', {
-          method: 'POST',
-          headers: {
-            'Authorization': `token ${token}`,
-            'Accept': 'application/vnd.github.v3+json',
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload)
+        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/runs?per_page=1`, {
+          headers: { "Authorization": `Bearer ${patToken}` }
         });
+        const data = await res.json();
+        const latestRun = data.workflow_runs ? data.workflow_runs[0] : null;
 
-        if (response.ok) {
-          statusDiv.className = 'status success';
-          statusDiv.style.display = 'block';
-          statusDiv.innerText = '✅ Build triggered! GitHub Actions is processing your EPUB now.';
-        } else {
-          throw new Error(`GitHub API error: ${response.statusText}`);
+        if (latestRun) {
+          if (latestRun.status === "completed") {
+            clearInterval(interval);
+            submitBtn.disabled = false;
+
+            if (latestRun.conclusion === "success") {
+              statusBox.innerHTML = `
+                ✅ <strong>EPUB Generated Successfully!</strong><br>
+                <a href="${latestRun.html_url}" target="_blank" class="download-btn">
+                   📥 Download Artifact on GitHub
+                </a>
+              `;
+            } else {
+              statusBox.innerHTML = `❌ Workflow completed with status: <strong>${latestRun.conclusion}</strong>.<br><a href="${latestRun.html_url}" target="_blank" style="color:var(--accent);">View Run Logs</a>`;
+            }
+          } else {
+            statusBox.innerHTML = `⏳ Building eBook... Status: <strong>${latestRun.status}</strong> (${attempts * 5}s elapsed)`;
+          }
         }
       } catch (err) {
-        statusDiv.className = 'status error';
-        statusDiv.style.display = 'block';
-        statusDiv.innerText = `❌ Error: ${err.message}`;
-      } finally {
-        submitBtn.disabled = false;
-        submitBtn.innerText = "🚀 Generate & Compile EPUB";
+        console.error("Polling error:", err);
       }
-    });
-  </script>
+
+      if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        submitBtn.disabled = false;
+        statusBox.innerHTML = `⏱️ Build is taking longer than expected. Check progress in <a href="https://github.com/${owner}/${repo}/actions" target="_blank" style="color:var(--accent);">GitHub Actions</a>.`;
+      }
+    }, 5000);
+  }
+</script>
+
 </body>
 </html>
