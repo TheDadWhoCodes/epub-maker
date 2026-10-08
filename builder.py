@@ -41,8 +41,13 @@ def extract_article_content(url):
 
 
 def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
-    """Uses Gemini 2.5 Flash to format HTML, preserving image tags."""
+    """Uses Gemini to generate a structured chapter layout, falling back across models if needed."""
     client = genai.Client(api_key=api_key)
+    
+    # Prioritized list of models to try in order
+    models_to_try = [
+        "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"
+    ]
     
     prompt = f"""
     You are an expert editor formatting web content into a published eBook chapter.
@@ -51,20 +56,36 @@ def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
     Article Content:
     {text if text else ''}
     
-    Please output clean HTML format for an EPUB chapter containing:
-    1. An 'Executive Summary' box at the top (2-3 bullet points).
-    2. Clean, well-structured article text broken into logical HTML section headings (<h2>, <p>).
-    3. IMPORTANT: Preserve any <img> tags and their src attributes from the original content where relevant.
-    
-    Return ONLY the raw HTML body content without top-level ```html codeblock wrappers.
+    Instructions:
+    - Output the complete, unabridged article content formatted as clean HTML.
+    - Start directly from the main content / first paragraph of the article.
+    - Retain all original paragraphs (<p>), section headings (<h2>, <h3>), lists (<ul>, <ol>), and image tags (<img> with original src attributes).
+    - Remove any extraneous site navigation, header elements, footer links, share buttons, or ads.
+    - Do NOT summarize or shorten the text. Keep all original article prose intact.
+    - Return ONLY the raw HTML fragment for the chapter body. Do not include ```html markdown codeblock wrappers or <html>/<body> boilerplate.
     """
     
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=prompt
-    )
-    
-    content = response.text or ""
+    response = None
+    last_error = None
+
+    for model in models_to_try:
+        try:
+            print(f"🤖 Trying Gemini model: {model}...")
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt
+            )
+            if response and response.text:
+                print(f"✅ Successfully generated content using {model}")
+                break
+        except Exception as e:
+            print(f"⚠️ Model {model} failed: {e}")
+            last_error = e
+
+    if not response or not response.text:
+        raise RuntimeError(f"❌ All Gemini models failed. Last error: {last_error}")
+
+    content = response.text
     
     # Clean codeblock markdown if present
     if content.startswith("```html"):
