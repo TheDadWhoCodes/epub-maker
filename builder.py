@@ -147,9 +147,7 @@ def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
     
     # Prioritized list of valid production Gemini models
     models_to_try = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-pro"
+        "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"
     ]
     
     prompt = f"""
