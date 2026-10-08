@@ -2,11 +2,13 @@ import sys
 import os
 import json
 import base64
+import re
 import requests
 import trafilatura
 from bs4 import BeautifulSoup
 from google import genai
 from ebooklib import epub
+from urllib.parse import urljoin
 
 try:
     from dotenv import load_dotenv
@@ -15,29 +17,87 @@ except ImportError:
     pass
 
 
-def extract_article_content(url):
-    downloaded = trafilatura.fetch_url(url)
-    if not downloaded:
-        return None, None
-    
-    # Enable include_images=True to preserve <img> tags
-    text = trafilatura.extract(
-        downloaded, 
-        include_images=True,
-        favor_recall=True,
-        include_tables=True,
-        include_comments=False
-    )
-    
-    # Fallback if trafilatura returned minimal text
-    if not text or len(text.strip()) < 200:
-        from trafilatura import baseline
-        _, text, _ = baseline(downloaded)
+def extract_with_playwright(url):
+    """Fallback engine: Launches a headless Chrome browser to render JS, auto-scroll, and extract DOM."""
+    try:
+        from playwright.sync_api import sync_playwright
+        print(f"🌐 JS/Lazy-load detected for {url}. Rendering with headless browser...")
         
-    metadata = trafilatura.extract_metadata(downloaded)
-    title = metadata.title if metadata and metadata.title else "Untitled Article"
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            page = context.new_page()
+            
+            # Navigate and wait until network is quiet
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            
+            # Auto-scroll down the page to trigger lazy-loaded text/images
+            page.evaluate("""
+                async () => {
+                    await new Promise((resolve) => {
+                        let totalHeight = 0;
+                        const distance = 400;
+                        const timer = setInterval(() => {
+                            const scrollHeight = document.body.scrollHeight;
+                            window.scrollBy(0, distance);
+                            totalHeight += distance;
+                            if(totalHeight >= scrollHeight || totalHeight > 10000){
+                                clearInterval(timer);
+                                resolve();
+                            }
+                        }, 100);
+                    });
+                }
+            """)
+            page.wait_for_timeout(1000) # Wait 1s for lazy content
+            
+            rendered_html = page.content()
+            browser.close()
+            
+            # Extract main content from fully rendered DOM
+            text = trafilatura.extract(
+                rendered_html,
+                output_format="html",
+                include_images=True,
+                include_tables=True,
+                favor_recall=True
+            )
+            
+            metadata = trafilatura.extract_metadata(rendered_html)
+            title = metadata.title if metadata and metadata.title else "Untitled Article"
+            
+            return title, text
+    except Exception as e:
+        print(f"⚠️ Playwright rendering failed: {e}")
+        return None, None
+
+def extract_article_content(url):
+    """Universal scraper: Tries fast static extraction first, falls back to full browser rendering if needed."""
+    downloaded = trafilatura.fetch_url(url)
+    title = None
+    text = None
     
-    return title, text
+    if downloaded:
+        text = trafilatura.extract(
+            downloaded,
+            output_format="html",
+            include_images=True,
+            include_tables=True,
+            favor_recall=True
+        )
+        metadata = trafilatura.extract_metadata(downloaded)
+        title = metadata.title if metadata and metadata.title else "Untitled Article"
+
+    # Universal Fallback Threshold:
+    # If static extraction returned empty or less than 300 characters,
+    # the site relies on JS rendering or lazy loading — trigger Playwright!
+    if not text or len(text.strip()) < 300:
+        print(f"⚡ Static scraper got minimal content. Running headless browser for {url}...")
+        pw_title, pw_text = extract_with_playwright(url)
+        if pw_text:
+            return pw_title or title or "Untitled Article", pw_text
+
+    return title or "Untitled Article", text
 
 
 def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
@@ -98,19 +158,22 @@ def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
     return content.strip()
 
 
-def process_and_embed_images(book, chapter_html, chapter_index):
-    """Parses HTML for <img> tags, downloads the images, registers them in EPUB, and updates src attributes."""
+def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
     soup = BeautifulSoup(chapter_html, 'html.parser')
     images = soup.find_all('img')
 
     for img_idx, img in enumerate(images):
         img_url = img.get('src')
-        if not img_url or not img_url.startswith('http'):
+        if not img_url:
             continue
+            
+        # Convert relative URLs (/assets/img.jpg) to absolute (https://site.com/assets/img.jpg)
+        if not img_url.startswith('http'):
+            img_url = urljoin(base_url, img_url)
 
         try:
-            # Download image data
             resp = requests.get(img_url, timeout=10)
+            # ... rest of image embedding logic ...
             if resp.status_code == 200:
                 content_type = resp.headers.get('Content-Type', '')
                 
