@@ -18,58 +18,100 @@ except ImportError:
 
 
 def extract_with_playwright(url):
-    """Fallback engine: Launches a headless Chrome browser to render JS, auto-scroll, and extract DOM."""
+    """Fallback engine: Launches a headless Chrome browser, unrolls Shadow DOMs, auto-scrolls, and extracts DOM."""
     try:
         from playwright.sync_api import sync_playwright
-        print(f"🌐 JS/Lazy-load detected for {url}. Rendering with headless browser...")
+        print(f"🌐 JS/Lazy-load/Shadow DOM detected for {url}. Rendering with Playwright...")
         
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
             page = context.new_page()
             
-            # Navigate and wait until network is quiet
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # Navigate and wait for DOM load
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
             
-            # Auto-scroll down the page to trigger lazy-loaded text/images
+            # Auto-scroll to trigger lazy loading
             page.evaluate("""
                 async () => {
                     await new Promise((resolve) => {
                         let totalHeight = 0;
-                        const distance = 400;
+                        const distance = 500;
                         const timer = setInterval(() => {
                             const scrollHeight = document.body.scrollHeight;
                             window.scrollBy(0, distance);
                             totalHeight += distance;
-                            if(totalHeight >= scrollHeight || totalHeight > 10000){
+                            if(totalHeight >= scrollHeight || totalHeight > 15000){
                                 clearInterval(timer);
                                 resolve();
                             }
-                        }, 100);
+                        }, 150);
                     });
                 }
             """)
-            page.wait_for_timeout(1000) # Wait 1s for lazy content
+            page.wait_for_timeout(2000) # Wait 2s for late scripts
             
-            rendered_html = page.content()
+            # JS Helper: Recursively flatten/unroll Shadow DOMs into open HTML
+            flattened_html = page.evaluate("""
+                () => {
+                    function unrollShadow(node) {
+                        let html = '';
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            return node.textContent;
+                        }
+                        if (node.nodeType !== Node.ELEMENT_NODE) {
+                            return '';
+                        }
+                        
+                        const tagName = node.tagName.toLowerCase();
+                        if (['script', 'style', 'noscript', 'iframe'].includes(tagName)) {
+                            return '';
+                        }
+
+                        html += `<${tagName}`;
+                        for (let attr of node.attributes) {
+                            html += ` ${attr.name}="${attr.value.replace(/"/g, '&quot;')}"`;
+                        }
+                        html += '>';
+
+                        // Flatten shadow root if present
+                        if (node.shadowRoot) {
+                            for (let child of node.shadowRoot.childNodes) {
+                                html += unrollShadow(child);
+                            }
+                        }
+                        
+                        // Process regular child nodes
+                        for (let child of node.childNodes) {
+                            html += unrollShadow(child);
+                        }
+
+                        html += `</${tagName}>`;
+                        return html;
+                    }
+                    return unrollShadow(document.body);
+                }
+            """)
+            
             browser.close()
             
-            # Extract main content from fully rendered DOM
+            # Extract main content using trafilatura on the flattened DOM
             text = trafilatura.extract(
-                rendered_html,
+                flattened_html,
                 output_format="html",
                 include_images=True,
                 include_tables=True,
                 favor_recall=True
             )
             
-            metadata = trafilatura.extract_metadata(rendered_html)
+            metadata = trafilatura.extract_metadata(flattened_html)
             title = metadata.title if metadata and metadata.title else "Untitled Article"
             
             return title, text
     except Exception as e:
         print(f"⚠️ Playwright rendering failed: {e}")
         return None, None
+
 
 def extract_article_content(url):
     """Universal scraper: Tries fast static extraction first, falls back to full browser rendering if needed."""
@@ -89,9 +131,8 @@ def extract_article_content(url):
         title = metadata.title if metadata and metadata.title else "Untitled Article"
 
     # Universal Fallback Threshold:
-    # If static extraction returned empty or less than 300 characters,
-    # the site relies on JS rendering or lazy loading — trigger Playwright!
-    if not text or len(text.strip()) < 300:
+    # If static extraction returned empty or under 400 characters, trigger Playwright
+    if not text or len(text.strip()) < 400:
         print(f"⚡ Static scraper got minimal content. Running headless browser for {url}...")
         pw_title, pw_text = extract_with_playwright(url)
         if pw_text:
@@ -104,9 +145,11 @@ def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
     """Uses Gemini to generate a structured chapter layout, falling back across models if needed."""
     client = genai.Client(api_key=api_key)
     
-    # Prioritized list of models to try in order
+    # Prioritized list of valid production Gemini models
     models_to_try = [
-        "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro"
     ]
     
     prompt = f"""
@@ -159,6 +202,7 @@ def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
 
 
 def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
+    """Parses HTML for <img> tags, resolves relative links, downloads images, and embeds them into EPUB."""
     soup = BeautifulSoup(chapter_html, 'html.parser')
     images = soup.find_all('img')
 
@@ -173,7 +217,6 @@ def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
 
         try:
             resp = requests.get(img_url, timeout=10)
-            # ... rest of image embedding logic ...
             if resp.status_code == 200:
                 content_type = resp.headers.get('Content-Type', '')
                 
@@ -244,8 +287,8 @@ def build_epub(title: str, articles: list, cover_b64: str = None, output_path: s
 
         chapter_html = summarize_and_format_chapter(article_title, article_text, api_key)
         
-        # Download and embed article images
-        final_html = process_and_embed_images(book, chapter_html, i+1)
+        # Download and embed article images (PASS base_url=url)
+        final_html = process_and_embed_images(book, chapter_html, i+1, base_url=url)
 
         # Create EPUB chapter using article_title
         c = epub.EpubHtml(title=article_title, file_name=f"chap_{i+1}.xhtml", lang="en")
