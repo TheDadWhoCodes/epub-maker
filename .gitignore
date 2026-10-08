@@ -1,0 +1,14 @@
+# Environments
+venv/
+.venv/
+
+# Environment secrets
+.env
+
+# Output files
+*.epub
+
+# Caches and OS files
+__pycache__/
+*.pyc
+.DS_Store

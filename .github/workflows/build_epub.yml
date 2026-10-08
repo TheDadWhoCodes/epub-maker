@@ -1,0 +1,48 @@
+name: Generate EPUB
+
+on:
+  repository_dispatch:
+    types: [generate_epub]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install google-genai ebooklib trafilatura requests
+
+      - name: Compile EPUB
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          python builder.py
+
+      - name: Send EPUB to Kindle via Email (Optional)
+        uses: dawidd6/action-send-mail@v3
+        if: env.KINDLE_EMAIL != ''
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "Convert"
+          body: "Your web articles compiled into EPUB format."
+          to: ${{ secrets.KINDLE_EMAIL }}
+          from: "Web-to-EPUB Generator"
+          attachments: book.epub
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-epub
+          path: book.epub
