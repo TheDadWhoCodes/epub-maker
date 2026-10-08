@@ -60,7 +60,7 @@ def summarize_and_format_chapter(title: str, text: str, api_key: str) -> str:
     """
     
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.5-flash-lite",
         contents=prompt
     )
     
