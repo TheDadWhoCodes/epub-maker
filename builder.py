@@ -16,32 +16,41 @@ except ImportError:
 
 def extract_page_content_playwright(url: str):
     """
-    Renders the page with Playwright, clicks all interactive tabs/accordions,
-    and extracts complete expanded DOM text.
+    Renders WotC pages, bypasses cookie/privacy modals, clicks expandable cards,
+    and extracts only main body text.
     """
-    print(f"🌐 Fetching complete page content via Playwright: {url}")
+    print(f"🌐 Fetching page content via Playwright: {url}")
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
             )
             page = context.new_page()
+            
+            # Block cookie banner scripts/analytics from loading
+            page.route("**/*onetrust*", lambda route: route.abort())
+            page.route("**/*cookie*", lambda route: route.abort())
+
             page.goto(url, wait_until="networkidle", timeout=60000)
 
-            # Step 1: Click all interactive tabs, accordions, and "Read More" buttons to expand hidden sections
+            # Force-remove Privacy Center / OneTrust cookie overlays directly from DOM
             page.evaluate("""
                 () => {
-                    const expandables = document.querySelectorAll('button, [role="tab"], .accordion-header, [data-toggle], .read-more');
-                    expandables.forEach(el => {
-                        try { el.click(); } catch(e) {}
+                    const cookieSelectors = [
+                        '#onetrust-consent-sdk', '.onetrust-pc-dark', '#onetrust-banner-sdk',
+                        '[id*="onetrust"]', '[class*="cookie"]', '[id*="privacy"]', '.optanon-alert-box-wrapper'
+                    ];
+                    cookieSelectors.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(el => el.remove());
                     });
                 }
             """)
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(1000)
 
-            # Step 2: Auto-scroll down the entire page to trigger lazy components
+            # Auto-scroll to trigger lazy-loaded text sections
             page.evaluate("""
                 async () => {
                     await new Promise((resolve) => {
@@ -49,7 +58,7 @@ def extract_page_content_playwright(url: str):
                         const timer = setInterval(() => {
                             window.scrollBy(0, 800);
                             totalHeight += 800;
-                            if(totalHeight >= document.body.scrollHeight || totalHeight > 25000){
+                            if(totalHeight >= document.body.scrollHeight || totalHeight > 20000){
                                 clearInterval(timer);
                                 resolve();
                             }
@@ -59,26 +68,36 @@ def extract_page_content_playwright(url: str):
             """)
             page.wait_for_timeout(2000)
 
-            # Extract title
+            # Extract page title
             title = page.title() or "Magic Story"
             h1 = page.query_selector("h1")
             if h1:
                 title = h1.inner_text().strip()
 
-            # Clean out site boilerplate (nav, header, footer, ads)
+            # Remove site headers, footers, navigation, and sidebar links
             page.evaluate("""
                 () => {
-                    const selectors = ['header', 'footer', 'nav', '.share-buttons', '.social-share', 'script', 'style', 'iframe', '#cookie-banner'];
-                    selectors.forEach(sel => {
+                    const boilerplate = [
+                        'header', 'footer', 'nav', '.global-nav', '.site-footer',
+                        '.share-buttons', '.social-share', 'script', 'style', 'iframe'
+                    ];
+                    boilerplate.forEach(sel => {
                         document.querySelectorAll(sel).forEach(el => el.remove());
                     });
                 }
             """)
 
+            # Extract content specifically from article/main or content containers
             main_html = page.evaluate("""
                 () => {
-                    const main = document.querySelector('main') || document.querySelector('article') || document.body;
-                    return main.innerHTML;
+                    const selectors = ['article', 'main', '[class*="plane"]', '[class*="story"]', '[class*="content"]'];
+                    for (let sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el && el.innerText.trim().length > 200) {
+                            return el.innerHTML;
+                        }
+                    }
+                    return document.body.innerHTML;
                 }
             """)
 
@@ -91,23 +110,32 @@ def extract_page_content_playwright(url: str):
 
 
 def clean_and_format_html(html_raw: str) -> str:
-    """Cleans extracted raw HTML to preserve all readable story text, headings, and images for EPUB."""
+    """Filters out privacy noise and extracts clean prose paragraphs and images."""
     soup = BeautifulSoup(html_raw, 'html.parser')
     
-    # Target all text and image nodes across standard and custom elements
-    content_tags = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'p', 'div', 'span', 'li', 'ul', 'ol', 'blockquote', 'img'])
+    # Remove any leftover privacy/cookie tags that survived
+    for junk in soup.find_all(class_=re.compile(r'privacy|cookie|onetrust|footer|header|nav', re.I)):
+        junk.decompose()
+
+    content_tags = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'p', 'div', 'span', 'li', 'blockquote', 'img'])
     
     clean_elements = []
     seen_text = set()
 
+    # Noise phrases to discard
+    banned_phrases = ["privacy center", "cookie settings", "explore the lore", "all rights reserved", "terms of use"]
+
     for tag in content_tags:
-        # Avoid duplicate text from nested container tags
+        # Ignore containers that hold child tags to avoid duplicate parent text
         if tag.name in ['div', 'span'] and tag.find(['p', 'h1', 'h2', 'h3', 'h4', 'div']):
             continue
 
         text = tag.get_text(strip=True)
-        
-        # Filter empty tags or extreme duplicates
+        text_lower = text.lower()
+
+        # Filter out cookie/privacy noise or empty blocks
+        if any(banned in text_lower for banned in banned_phrases):
+            continue
         if not text and not tag.find('img'):
             continue
         if text in seen_text and not tag.find('img'):
@@ -122,11 +150,8 @@ def clean_and_format_html(html_raw: str) -> str:
             clean_elements.append(f"<{tag.name}>{text}</{tag.name}>")
         elif tag.name == 'img':
             clean_elements.append(str(tag))
-        elif tag.name in ['ul', 'ol']:
-            clean_elements.append(str(tag))
 
     return "".join(clean_elements)
-
 
 def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
     """Downloads images and embeds them inside the EPUB."""
