@@ -16,10 +16,10 @@ except ImportError:
 
 def extract_page_content_playwright(url: str):
     """
-    Renders the page fully with Playwright and extracts the complete story/lore 
-    content directly from the DOM, regardless of DOM structure.
+    Renders the page with Playwright, clicks all interactive tabs/accordions,
+    and extracts complete expanded DOM text.
     """
-    print(f"🌐 Fetching page content via Playwright: {url}")
+    print(f"🌐 Fetching complete page content via Playwright: {url}")
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -30,7 +30,18 @@ def extract_page_content_playwright(url: str):
             page = context.new_page()
             page.goto(url, wait_until="networkidle", timeout=60000)
 
-            # Auto-scroll to trigger late client-side renders
+            # Step 1: Click all interactive tabs, accordions, and "Read More" buttons to expand hidden sections
+            page.evaluate("""
+                () => {
+                    const expandables = document.querySelectorAll('button, [role="tab"], .accordion-header, [data-toggle], .read-more');
+                    expandables.forEach(el => {
+                        try { el.click(); } catch(e) {}
+                    });
+                }
+            """)
+            page.wait_for_timeout(1500)
+
+            # Step 2: Auto-scroll down the entire page to trigger lazy components
             page.evaluate("""
                 async () => {
                     await new Promise((resolve) => {
@@ -38,7 +49,7 @@ def extract_page_content_playwright(url: str):
                         const timer = setInterval(() => {
                             window.scrollBy(0, 800);
                             totalHeight += 800;
-                            if(totalHeight >= document.body.scrollHeight || totalHeight > 15000){
+                            if(totalHeight >= document.body.scrollHeight || totalHeight > 25000){
                                 clearInterval(timer);
                                 resolve();
                             }
@@ -48,23 +59,22 @@ def extract_page_content_playwright(url: str):
             """)
             page.wait_for_timeout(2000)
 
-            # Pull title
+            # Extract title
             title = page.title() or "Magic Story"
             h1 = page.query_selector("h1")
             if h1:
                 title = h1.inner_text().strip()
 
-            # Clean out headers, footers, navs, and social buttons directly in DOM
+            # Clean out site boilerplate (nav, header, footer, ads)
             page.evaluate("""
                 () => {
-                    const selectors = ['header', 'footer', 'nav', '.share-buttons', '.social-share', 'script', 'style', 'iframe'];
+                    const selectors = ['header', 'footer', 'nav', '.share-buttons', '.social-share', 'script', 'style', 'iframe', '#cookie-banner'];
                     selectors.forEach(sel => {
                         document.querySelectorAll(sel).forEach(el => el.remove());
                     });
                 }
             """)
 
-            # Extract main content body
             main_html = page.evaluate("""
                 () => {
                     const main = document.querySelector('main') || document.querySelector('article') || document.body;
@@ -81,23 +91,38 @@ def extract_page_content_playwright(url: str):
 
 
 def clean_and_format_html(html_raw: str) -> str:
-    """Cleans extracted raw HTML to preserve readable story text and images for EPUB."""
+    """Cleans extracted raw HTML to preserve all readable story text, headings, and images for EPUB."""
     soup = BeautifulSoup(html_raw, 'html.parser')
     
-    # Keep structural content tags
-    content_tags = soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'span', 'li', 'ul', 'ol', 'blockquote', 'img'])
+    # Target all text and image nodes across standard and custom elements
+    content_tags = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'p', 'div', 'span', 'li', 'ul', 'ol', 'blockquote', 'img'])
     
     clean_elements = []
+    seen_text = set()
+
     for tag in content_tags:
-        # Ignore empty tags or navigation links
+        # Avoid duplicate text from nested container tags
+        if tag.name in ['div', 'span'] and tag.find(['p', 'h1', 'h2', 'h3', 'h4', 'div']):
+            continue
+
         text = tag.get_text(strip=True)
+        
+        # Filter empty tags or extreme duplicates
         if not text and not tag.find('img'):
             continue
-        if tag.name == 'p' or tag.name == 'span':
+        if text in seen_text and not tag.find('img'):
+            continue
+            
+        if text:
+            seen_text.add(text)
+
+        if tag.name in ['p', 'span', 'div']:
             clean_elements.append(f"<p>{tag.decode_contents()}</p>")
         elif tag.name.startswith('h'):
             clean_elements.append(f"<{tag.name}>{text}</{tag.name}>")
         elif tag.name == 'img':
+            clean_elements.append(str(tag))
+        elif tag.name in ['ul', 'ol']:
             clean_elements.append(str(tag))
 
     return "".join(clean_elements)
