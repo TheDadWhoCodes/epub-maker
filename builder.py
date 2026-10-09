@@ -251,7 +251,7 @@ if __name__ == "__main__":
         try:
             payload = json.loads(payload_raw)
             title = payload.get("title", title)
-            urls = payload.get("urls", [])
+            urls = payload.get("urls", ['https://magic.wizards.com/en/story/fiora-plane', 'https://magic.wizards.com/en/story/innistrad-plane'])
             cover_b64 = payload.get("cover_b64")
         except json.JSONDecodeError:
             pass
