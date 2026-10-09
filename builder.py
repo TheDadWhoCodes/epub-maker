@@ -4,11 +4,9 @@ import json
 import base64
 import re
 import requests
-import trafilatura
 from bs4 import BeautifulSoup
-from google import genai
 from ebooklib import epub
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 try:
     from dotenv import load_dotenv
@@ -17,33 +15,51 @@ except ImportError:
     pass
 
 
-def extract_wotc_magic_story(url):
+def discover_stories_from_plane_page(input_url: str) -> list[dict]:
     """
-    Dedicated scraper for Wizards of the Coast (Magic Story) pages.
-    Extracts the full title and complete story body without aggressive filtering or truncation.
+    Crawls WotC Plane/Story pages (like /story/fiora-plane) by triggering 
+    interactive elements, unrolling accordions, and extracting hidden text or links.
     """
+    print(f"🔎 Scanning WotC Plane Hub page: {input_url}")
+    stories = []
+
     try:
         from playwright.sync_api import sync_playwright
-        print(f"🪄 Extracting WotC Magic Story directly from {url}...")
-        
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
             page = context.new_page()
-            
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            
-            # Scroll aggressively to trigger all lazy-loaded content/images
+
+            # Navigate to the page
+            page.goto(input_url, wait_until="networkidle", timeout=60000)
+
+            # Step 1: Click all accordions, "Read Story", "Expand", or tab elements on the page
+            page.evaluate("""
+                () => {
+                    const selectors = [
+                        'button', '[role="button"]', '.accordion-header', 
+                        '.story-card', '.expandable', '[data-toggle]'
+                    ];
+                    selectors.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(el => {
+                            try { el.click(); } catch(e) {}
+                        });
+                    });
+                }
+            """)
+            page.wait_for_timeout(2000)
+
+            # Step 2: Auto-scroll down the entire page
             page.evaluate("""
                 async () => {
                     await new Promise((resolve) => {
                         let totalHeight = 0;
-                        const distance = 800;
                         const timer = setInterval(() => {
-                            const scrollHeight = document.body.scrollHeight;
-                            window.scrollBy(0, distance);
-                            totalHeight += distance;
-                            if(totalHeight >= scrollHeight){
+                            window.scrollBy(0, 800);
+                            totalHeight += 800;
+                            if(totalHeight >= document.body.scrollHeight || totalHeight > 25000){
                                 clearInterval(timer);
                                 resolve();
                             }
@@ -52,230 +68,99 @@ def extract_wotc_magic_story(url):
                 }
             """)
             page.wait_for_timeout(2000)
-            
-            content = page.content()
+
+            # Step 3: Extract story text rendered directly on the plane page (Accordion text)
+            rendered_html = page.content()
             browser.close()
 
-            soup = BeautifulSoup(content, 'html.parser')
+            soup = BeautifulSoup(rendered_html, 'html.parser')
 
-            # Extract Title
-            title_node = soup.find('h1') or soup.find('title')
-            title = title_node.get_text(strip=True) if title_node else "Magic Story"
-
-            # WotC story content resides inside specific article/container tags
-            # Common WotC story selectors:
-            story_container = (
-                soup.find('div', class_=re.compile(r'article-body|story-body|body-content|page-content|article-content', re.I)) or
-                soup.find('article') or
-                soup.find('main')
-            )
-
-            if not story_container:
-                story_container = soup.body
-
-            # Extract paragraphs, headings, blockquotes, and images
-            elements = story_container.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'blockquote', 'ul', 'ol', 'figure', 'img'])
+            # Check if story text is embedded directly on the page (in sections/accordions)
+            story_sections = soup.find_all(['section', 'article', 'div'], class_=re.compile(r'story|accordion|chapter|section-body', re.I))
             
-            clean_html_parts = []
-            for el in elements:
-                # Filter out obvious UI junk/share buttons
-                if el.find_parent(class_=re.compile(r'share|social|nav|footer|header|author-bio', re.I)):
-                    continue
-                clean_html_parts.append(str(el))
+            for idx, sec in enumerate(story_sections, 1):
+                p_tags = sec.find_all('p')
+                # If a section has at least 3 paragraphs of story text embedded directly:
+                if len(p_tags) >= 3:
+                    header = sec.find(['h1', 'h2', 'h3', 'h4', 'h5'])
+                    sec_title = header.get_text(strip=True) if header else f"Story Part {idx}"
+                    
+                    clean_parts = [str(tag) for tag in sec.find_all(['p', 'h2', 'h3', 'h4', 'blockquote', 'figure', 'img'])]
+                    stories.append({
+                        'title': sec_title,
+                        'html': "".join(clean_parts),
+                        'url': input_url
+                    })
 
-            story_html = "".join(clean_html_parts)
-            return title, story_html
+            # Step 4: Extract external links to child story pages if present
+            found_urls = []
+            for a_tag in soup.find_all('a', href=True):
+                href = urljoin(input_url, a_tag['href']).split('?')[0].split('#')[0]
+                if ("wizards.com" in href) and href != input_url:
+                    if re.search(r'/(news/magic-story|story|articles)/', href) and href not in found_urls:
+                        found_urls.append(href)
+
+            # If external chapter links were found, add them to the queue
+            if found_urls:
+                print(f"🔗 Discovered {len(found_urls)} external chapter links on plane page.")
+                for link in found_urls:
+                    stories.append({'title': None, 'html': None, 'url': link})
 
     except Exception as e:
-        print(f"⚠️ Dedicated WotC scraper failed: {e}")
-        return None, None
+        print(f"⚠️ Playwright hub extraction failed: {e}")
+
+    return stories
 
 
-def extract_with_playwright(url):
-    """Fallback engine for dynamic pages."""
+def extract_wotc_story_direct(url: str):
+    """Fallback server-side request for standalone story article URLs."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    }
     try:
-        from playwright.sync_api import sync_playwright
-        print(f"🌐 JS/Lazy-load detected for {url}. Rendering with Playwright...")
-        
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-            page = context.new_page()
-            
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            
-            page.evaluate("""
-                async () => {
-                    await new Promise((resolve) => {
-                        let totalHeight = 0;
-                        const distance = 500;
-                        const timer = setInterval(() => {
-                            const scrollHeight = document.body.scrollHeight;
-                            window.scrollBy(0, distance);
-                            totalHeight += distance;
-                            if(totalHeight >= scrollHeight || totalHeight > 15000){
-                                clearInterval(timer);
-                                resolve();
-                            }
-                        }, 150);
-                    });
-                }
-            """)
-            page.wait_for_timeout(2000)
-            
-            flattened_html = page.evaluate("""
-                () => {
-                    function unrollShadow(node) {
-                        let html = '';
-                        if (node.nodeType === Node.TEXT_NODE) return node.textContent;
-                        if (node.nodeType !== Node.ELEMENT_NODE) return '';
-                        
-                        const tagName = node.tagName.toLowerCase();
-                        if (['script', 'style', 'noscript', 'iframe'].includes(tagName)) return '';
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return None, None
 
-                        html += `<${tagName}`;
-                        for (let attr of node.attributes) {
-                            html += ` ${attr.name}="${attr.value.replace(/"/g, '&quot;')}"`;
-                        }
-                        html += '>';
+        soup = BeautifulSoup(response.text, 'html.parser')
+        title_node = soup.find('h1') or soup.find('title')
+        title = title_node.get_text(strip=True) if title_node else "Magic Story"
 
-                        if (node.shadowRoot) {
-                            for (let child of node.shadowRoot.childNodes) {
-                                html += unrollShadow(child);
-                            }
-                        }
-                        for (let child of node.childNodes) {
-                            html += unrollShadow(child);
-                        }
+        # Find container with highest paragraph count
+        containers = soup.find_all(['div', 'article', 'section'], class_=re.compile(r'body|content|story|article', re.I))
+        best_container = None
+        max_p = 0
 
-                        html += `</${tagName}>`;
-                        return html;
-                    }
-                    return unrollShadow(document.body);
-                }
-            """)
-            
-            browser.close()
-            
-            text = trafilatura.extract(
-                flattened_html,
-                output_format="html",
-                include_images=True,
-                include_tables=True,
-                favor_recall=True
-            )
-            
-            metadata = trafilatura.extract_metadata(flattened_html)
-            title = metadata.title if metadata and metadata.title else "Untitled Article"
-            
-            return title, text
+        for c in containers:
+            p_tags = c.find_all('p')
+            if len(p_tags) > max_p:
+                max_p = len(p_tags)
+                best_container = c
+
+        if best_container and max_p >= 3:
+            clean_parts = []
+            for tag in best_container.find_all(['p', 'h2', 'h3', 'h4', 'blockquote', 'ul', 'ol', 'figure', 'img']):
+                if tag.find_parent(class_=re.compile(r'share|social|footer|header|nav|author', re.I)):
+                    continue
+                clean_parts.append(str(tag))
+
+            return title, "".join(clean_parts)
     except Exception as e:
-        print(f"⚠️ Playwright rendering failed: {e}")
-        return None, None
+        print(f"⚠️ Direct extraction failed for {url}: {e}")
 
-
-def extract_article_content(url):
-    """Universal scraper with special routing for Magic / WotC domains."""
-    # Route WotC / Magic story URLs to the custom handler
-    if "magic.wizards.com" in url or "wizards.com" in url:
-        w_title, w_html = extract_wotc_magic_story(url)
-        if w_html and len(w_html) > 500:
-            return w_title, w_html, True  # True indicates it's already clean HTML (skip LLM)
-
-    # Default extraction for other sites
-    downloaded = trafilatura.fetch_url(url)
-    title = None
-    text = None
-    
-    if downloaded:
-        text = trafilatura.extract(
-            downloaded,
-            output_format="html",
-            include_images=True,
-            include_tables=True,
-            favor_recall=True
-        )
-        metadata = trafilatura.extract_metadata(downloaded)
-        title = metadata.title if metadata and metadata.title else "Untitled Article"
-
-    if not text or len(text.strip()) < 400:
-        print(f"⚡ Static scraper got minimal content. Running Playwright for {url}...")
-        pw_title, pw_text = extract_with_playwright(url)
-        if pw_text:
-            return pw_title or title or "Untitled Article", pw_text, False
-
-    return title or "Untitled Article", text, False
-
-
-def format_chapter_content(title: str, text: str, is_already_html: bool, api_key: str) -> str:
-    """Formats HTML content, using Gemini only if raw plain text/unformatted content was retrieved."""
-    if is_already_html:
-        # For WotC content, we directly clean up the extracted HTML without using LLM to avoid token truncation
-        soup = BeautifulSoup(text, 'html.parser')
-        # Remove empty tags
-        for p in soup.find_all(['p', 'h2', 'h3']):
-            if not p.get_text(strip=True) and not p.find('img'):
-                p.decompose()
-        return str(soup)
-
-    client = genai.Client(api_key=api_key)
-    models_to_try = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"]
-
-    
-    prompt = f"""
-    You are an expert editor formatting web content into a published eBook chapter.
-    
-    Article Title: {title}
-    Article Content:
-    {text if text else ''}
-    
-    Instructions:
-- Output the complete, unabridged article content formatted as clean HTML.
-- Retain all original paragraphs (<p>), section headings (<h2>, <h3>), lists (<ul>, <ol>), and image tags (<img> with original src attributes).
-- Do NOT summarize or shorten the text. Keep all original article prose intact.
-- Return ONLY the raw HTML fragment for the chapter body. Do not include ```html markdown codeblock wrappers.
-    """
-    
-    response = None
-    last_error = None
-
-    for model in models_to_try:
-        try:
-            print(f"🤖 Formatting content with Gemini model: {model}...")
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt
-            )
-            if response and response.text:
-                break
-        except Exception as e:
-            print(f"⚠️ Model {model} failed: {e}")
-            last_error = e
-
-    if not response or not response.text:
-        return f"<div>{text}</div>"
-
-    content = response.text
-    if content.startswith("```html"):
-        content = content[7:]
-    if content.startswith("```"):
-        content = content[3:]
-    if content.endswith("```"):
-        content = content[:-3]
-        
-    return content.strip()
+    return None, None
 
 
 def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
-    """Parses HTML for <img> tags, downloads images, and embeds them into EPUB."""
+    """Downloads images and embeds them into EPUB."""
     soup = BeautifulSoup(chapter_html, 'html.parser')
     images = soup.find_all('img')
 
     for img_idx, img in enumerate(images):
-        img_url = img.get('src') or img.get('data-src')
-        if not img_url:
+        img_url = img.get('src') or img.get('data-src') or img.get('data-original')
+        if not img_url or img_url.startswith('data:'):
             continue
-            
+
         if not img_url.startswith('http'):
             img_url = urljoin(base_url, img_url)
 
@@ -283,18 +168,14 @@ def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
             resp = requests.get(img_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
             if resp.status_code == 200:
                 content_type = resp.headers.get('Content-Type', '')
-                
                 ext = 'jpg'
                 media_type = 'image/jpeg'
                 if 'png' in content_type:
-                    ext = 'png'
-                    media_type = 'image/png'
+                    ext, media_type = 'png', 'image/png'
                 elif 'gif' in content_type:
-                    ext = 'gif'
-                    media_type = 'image/gif'
+                    ext, media_type = 'gif', 'image/gif'
                 elif 'webp' in content_type:
-                    ext = 'webp'
-                    media_type = 'image/webp'
+                    ext, media_type = 'webp', 'image/webp'
 
                 internal_filename = f"images/chap_{chapter_index}_img_{img_idx+1}.{ext}"
 
@@ -305,26 +186,20 @@ def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
                     content=resp.content
                 )
                 book.add_item(img_item)
-
                 img['src'] = internal_filename
                 print(f"  📸 Embedded image: {internal_filename}")
-
         except Exception as e:
             print(f"  ⚠️ Could not download image {img_url}: {e}")
 
     return str(soup)
 
 
-def build_epub(title: str, articles: list, cover_b64: str = None, output_path: str = "book.epub"):
-    """Compiles extracted chapters and embedded images into an EPUB document."""
+def build_epub(title: str, urls: list, cover_b64: str = None, output_path: str = "book.epub"):
+    """Builds EPUB book from WotC URLs."""
     book = epub.EpubBook()
-    book.set_title(title or "Web Content Digest")
+    book.set_title(title or "Fiora - Magic Story")
     book.set_language("en")
-    book.add_author("Web-to-EPUB Converter")
-
-    api_key = os.getenv("GEMINI_API_KEY")
-
-    chapters = []
+    book.add_author("WotC Magic Story Converter")
 
     if cover_b64:
         try:
@@ -333,46 +208,55 @@ def build_epub(title: str, articles: list, cover_b64: str = None, output_path: s
         except Exception as e:
             print(f"⚠️ Could not decode cover image: {e}")
 
-    for i, url in enumerate(articles):
-        print(f"\n📖 Processing article {i+1}/{len(articles)}: {url}")
-        article_title, article_text, is_clean_html = extract_article_content(url)
+    chapters = []
+    chapter_counter = 1
 
-        if not article_text:
-            print(f"⚠️ Warning: Could not extract content for {url}. Skipping...")
-            continue
+    for input_url in urls:
+        discovered_stories = discover_stories_from_plane_page(input_url)
 
-        chapter_html = format_chapter_content(article_title, article_text, is_clean_html, api_key)
-        final_html = process_and_embed_images(book, chapter_html, i+1, base_url=url)
+        for story in discovered_stories:
+            chap_title = story.get('title')
+            chap_html = story.get('html')
+            story_url = story.get('url')
 
-        c = epub.EpubHtml(title=article_title, file_name=f"chap_{i+1}.xhtml", lang="en")
-        c.content = f"<h1>{article_title}</h1>{final_html}"
-        book.add_item(c)
-        chapters.append(c)
+            # If story text wasn't directly embedded on the plane page, fetch it from story_url
+            if not chap_html and story_url:
+                print(f"\n📖 Fetching story from child page: {story_url}")
+                chap_title, chap_html = extract_wotc_story_direct(story_url)
+
+            if not chap_html:
+                continue
+
+            chap_title = chap_title or f"Chapter {chapter_counter}"
+            print(f"\n✅ Adding Chapter {chapter_counter}: {chap_title}")
+
+            final_html = process_and_embed_images(book, chap_html, chapter_counter, base_url=story_url or input_url)
+
+            c = epub.EpubHtml(title=chap_title, file_name=f"chap_{chapter_counter}.xhtml", lang="en")
+            c.content = f"<h1>{chap_title}</h1>{final_html}"
+            book.add_item(c)
+            chapters.append(c)
+            chapter_counter += 1
 
     if not chapters:
-        print("❌ No valid chapters extracted from provided URLs.")
+        print("❌ Failed to parse any valid story content.")
         sys.exit(1)
 
     book.toc = tuple(chapters)
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-
     book.spine = ["nav"] + chapters
 
     epub.write_epub(output_path, book)
-    print(f"\n✅ EPUB successfully created at: {output_path}")
+    print(f"\n🎉 Success! EPUB generated at: {output_path} ({len(chapters)} chapters included)")
 
 
 if __name__ == "__main__":
     payload_raw = os.getenv("CLIENT_PAYLOAD", "{}")
     payload = json.loads(payload_raw)
 
-    title = payload.get("title", "My Web Digest")
-    urls = payload.get("urls", [])
+    title = payload.get("title", "Fiora Plane Story")
+    urls = payload.get("urls", ["https://magic.wizards.com/en/story/fiora-plane"])
     cover_b64 = payload.get("cover_b64")
-
-    if not urls:
-        print("❌ No URLs provided in payload.")
-        sys.exit(1)
 
     build_epub(title, urls, cover_b64)
