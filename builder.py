@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import base64
+import re
 import requests
 from bs4 import BeautifulSoup
 from ebooklib import epub
