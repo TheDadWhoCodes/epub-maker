@@ -15,13 +15,13 @@ except ImportError:
     pass
 
 
-def discover_stories_from_plane_page(input_url: str) -> list[dict]:
+def discover_plane_story_urls(input_url: str) -> list[str]:
     """
-    Crawls WotC Plane/Story pages (like /story/fiora-plane) by triggering 
-    interactive elements, unrolling accordions, and extracting hidden text or links.
+    Crawls a WotC Plane page by listening to network requests (APIs)
+    and unrolling dynamic UI elements/Shadow DOMs to discover all story URLs.
     """
-    print(f"🔎 Scanning WotC Plane Hub page: {input_url}")
-    stories = []
+    print(f"🔎 Scanning WotC Hub page: {input_url}")
+    discovered_urls = set()
 
     try:
         from playwright.sync_api import sync_playwright
@@ -32,26 +32,27 @@ def discover_stories_from_plane_page(input_url: str) -> list[dict]:
             )
             page = context.new_page()
 
-            # Navigate to the page
+            # Network Interceptor: Listen for JSON payloads returned by WotC background APIs
+            def handle_response(response):
+                try:
+                    if "json" in response.headers.get("content-type", ""):
+                        data = response.json()
+                        json_str = json.dumps(data)
+                        # Scan JSON for story article paths
+                        matches = re.findall(r'/(?:en/)?(?:news/magic-story|story|articles)/[a-zA-Z0-9_-]+', json_str)
+                        for match in matches:
+                            full = urljoin("https://magic.wizards.com", match)
+                            if full != input_url:
+                                discovered_urls.add(full)
+                except Exception:
+                    pass
+
+            page.on("response", handle_response)
+
+            # Navigate
             page.goto(input_url, wait_until="networkidle", timeout=60000)
 
-            # Step 1: Click all accordions, "Read Story", "Expand", or tab elements on the page
-            page.evaluate("""
-                () => {
-                    const selectors = [
-                        'button', '[role="button"]', '.accordion-header', 
-                        '.story-card', '.expandable', '[data-toggle]'
-                    ];
-                    selectors.forEach(sel => {
-                        document.querySelectorAll(sel).forEach(el => {
-                            try { el.click(); } catch(e) {}
-                        });
-                    });
-                }
-            """)
-            page.wait_for_timeout(2000)
-
-            # Step 2: Auto-scroll down the entire page
+            # Scroll and trigger lazy components
             page.evaluate("""
                 async () => {
                     await new Promise((resolve) => {
@@ -59,7 +60,7 @@ def discover_stories_from_plane_page(input_url: str) -> list[dict]:
                         const timer = setInterval(() => {
                             window.scrollBy(0, 800);
                             totalHeight += 800;
-                            if(totalHeight >= document.body.scrollHeight || totalHeight > 25000){
+                            if(totalHeight >= document.body.scrollHeight || totalHeight > 20000){
                                 clearInterval(timer);
                                 resolve();
                             }
@@ -69,51 +70,43 @@ def discover_stories_from_plane_page(input_url: str) -> list[dict]:
             """)
             page.wait_for_timeout(2000)
 
-            # Step 3: Extract story text rendered directly on the plane page (Accordion text)
-            rendered_html = page.content()
+            # Extract links across open DOM + Shadow Roots
+            extracted_links = page.evaluate("""
+                () => {
+                    const links = new Set();
+                    function collectFromNode(node) {
+                        if (node.tagName === 'A' && node.href) {
+                            links.add(node.href);
+                        }
+                        if (node.shadowRoot) {
+                            node.shadowRoot.querySelectorAll('*').forEach(collectFromNode);
+                        }
+                        node.childNodes.forEach(collectFromNode);
+                    }
+                    collectFromNode(document.body);
+                    return Array.from(links);
+                }
+            """)
+
             browser.close()
 
-            soup = BeautifulSoup(rendered_html, 'html.parser')
-
-            # Check if story text is embedded directly on the page (in sections/accordions)
-            story_sections = soup.find_all(['section', 'article', 'div'], class_=re.compile(r'story|accordion|chapter|section-body', re.I))
-            
-            for idx, sec in enumerate(story_sections, 1):
-                p_tags = sec.find_all('p')
-                # If a section has at least 3 paragraphs of story text embedded directly:
-                if len(p_tags) >= 3:
-                    header = sec.find(['h1', 'h2', 'h3', 'h4', 'h5'])
-                    sec_title = header.get_text(strip=True) if header else f"Story Part {idx}"
-                    
-                    clean_parts = [str(tag) for tag in sec.find_all(['p', 'h2', 'h3', 'h4', 'blockquote', 'figure', 'img'])]
-                    stories.append({
-                        'title': sec_title,
-                        'html': "".join(clean_parts),
-                        'url': input_url
-                    })
-
-            # Step 4: Extract external links to child story pages if present
-            found_urls = []
-            for a_tag in soup.find_all('a', href=True):
-                href = urljoin(input_url, a_tag['href']).split('?')[0].split('#')[0]
-                if ("wizards.com" in href) and href != input_url:
-                    if re.search(r'/(news/magic-story|story|articles)/', href) and href not in found_urls:
-                        found_urls.append(href)
-
-            # If external chapter links were found, add them to the queue
-            if found_urls:
-                print(f"🔗 Discovered {len(found_urls)} external chapter links on plane page.")
-                for link in found_urls:
-                    stories.append({'title': None, 'html': None, 'url': link})
+            # Filter valid story URLs
+            for link in extracted_links:
+                clean_link = link.split('?')[0].split('#')[0]
+                if "wizards.com" in clean_link and clean_link != input_url:
+                    if re.search(r'/(news/magic-story|story|articles)/', clean_link):
+                        discovered_urls.add(clean_link)
 
     except Exception as e:
-        print(f"⚠️ Playwright hub extraction failed: {e}")
+        print(f"⚠️ Playwright discovery error: {e}")
 
-    return stories
+    url_list = list(discovered_urls)
+    print(f"✅ Discovered {len(url_list)} story links from hub page.")
+    return url_list
 
 
-def extract_wotc_story_direct(url: str):
-    """Fallback server-side request for standalone story article URLs."""
+def extract_wotc_story_article(url: str):
+    """Fetches and parses clean HTML prose from an individual story article URL."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     }
@@ -123,10 +116,12 @@ def extract_wotc_story_direct(url: str):
             return None, None
 
         soup = BeautifulSoup(response.text, 'html.parser')
-        title_node = soup.find('h1') or soup.find('title')
-        title = title_node.get_text(strip=True) if title_node else "Magic Story"
 
-        # Find container with highest paragraph count
+        # Title extraction
+        title_node = soup.find('h1') or soup.find('title')
+        title = title_node.get_text(strip=True) if title_node else "Magic Story Chapter"
+
+        # Find main content container by paragraph density
         containers = soup.find_all(['div', 'article', 'section'], class_=re.compile(r'body|content|story|article', re.I))
         best_container = None
         max_p = 0
@@ -152,7 +147,7 @@ def extract_wotc_story_direct(url: str):
 
 
 def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
-    """Downloads images and embeds them into EPUB."""
+    """Downloads images and embeds them inside the EPUB."""
     soup = BeautifulSoup(chapter_html, 'html.parser')
     images = soup.find_all('img')
 
@@ -195,9 +190,9 @@ def process_and_embed_images(book, chapter_html, chapter_index, base_url=""):
 
 
 def build_epub(title: str, urls: list, cover_b64: str = None, output_path: str = "book.epub"):
-    """Builds EPUB book from WotC URLs."""
+    """Builds the EPUB file from plane hub URLs or direct story URLs."""
     book = epub.EpubBook()
-    book.set_title(title or "Fiora - Magic Story")
+    book.set_title(title or "Magic Story Collection")
     book.set_language("en")
     book.add_author("WotC Magic Story Converter")
 
@@ -208,35 +203,43 @@ def build_epub(title: str, urls: list, cover_b64: str = None, output_path: str =
         except Exception as e:
             print(f"⚠️ Could not decode cover image: {e}")
 
-    chapters = []
-    chapter_counter = 1
-
+    # Phase 1: Expand input URLs into chapter URLs
+    all_story_urls = []
     for input_url in urls:
-        discovered_stories = discover_stories_from_plane_page(input_url)
+        # Check if input URL is already a single story article
+        if re.search(r'/news/magic-story/', input_url):
+            all_story_urls.append(input_url)
+        else:
+            discovered = discover_plane_story_urls(input_url)
+            all_story_urls.extend(discovered)
 
-        for story in discovered_stories:
-            chap_title = story.get('title')
-            chap_html = story.get('html')
-            story_url = story.get('url')
+    # Deduplicate while preserving order
+    unique_urls = []
+    for u in all_story_urls:
+        if u not in unique_urls:
+            unique_urls.append(u)
 
-            # If story text wasn't directly embedded on the plane page, fetch it from story_url
-            if not chap_html and story_url:
-                print(f"\n📖 Fetching story from child page: {story_url}")
-                chap_title, chap_html = extract_wotc_story_direct(story_url)
+    if not unique_urls:
+        print("❌ No story URLs could be resolved from input.")
+        sys.exit(1)
 
-            if not chap_html:
-                continue
+    # Phase 2: Build Chapters
+    chapters = []
+    for i, story_url in enumerate(unique_urls, 1):
+        print(f"\n📖 Processing Story {i}/{len(unique_urls)}: {story_url}")
+        chap_title, chap_html = extract_wotc_story_article(story_url)
 
-            chap_title = chap_title or f"Chapter {chapter_counter}"
-            print(f"\n✅ Adding Chapter {chapter_counter}: {chap_title}")
+        if not chap_html:
+            print(f"⚠️ Skipping empty or non-article page: {story_url}")
+            continue
 
-            final_html = process_and_embed_images(book, chap_html, chapter_counter, base_url=story_url or input_url)
+        print(f"  ✅ Extracted: {chap_title}")
+        final_html = process_and_embed_images(book, chap_html, i, base_url=story_url)
 
-            c = epub.EpubHtml(title=chap_title, file_name=f"chap_{chapter_counter}.xhtml", lang="en")
-            c.content = f"<h1>{chap_title}</h1>{final_html}"
-            book.add_item(c)
-            chapters.append(c)
-            chapter_counter += 1
+        c = epub.EpubHtml(title=chap_title, file_name=f"chap_{i}.xhtml", lang="en")
+        c.content = f"<h1>{chap_title}</h1>{final_html}"
+        book.add_item(c)
+        chapters.append(c)
 
     if not chapters:
         print("❌ Failed to parse any valid story content.")
@@ -252,11 +255,29 @@ def build_epub(title: str, urls: list, cover_b64: str = None, output_path: str =
 
 
 if __name__ == "__main__":
-    payload_raw = os.getenv("CLIENT_PAYLOAD", "{}")
-    payload = json.loads(payload_raw)
+    urls = []
+    title = "Magic Plane Stories"
+    cover_b64 = None
 
-    title = payload.get("title", "Fiora Plane Story")
-    urls = payload.get("urls", ["https://magic.wizards.com/en/story/fiora-plane"])
-    cover_b64 = payload.get("cover_b64")
+    # Option A: Read from CLI arguments (e.g. python main.py "https://...")
+    if len(sys.argv) > 1:
+        urls = sys.argv[1:]
+    else:
+        # Option B: Read from CLIENT_PAYLOAD environment variable
+        payload_raw = os.getenv("CLIENT_PAYLOAD", "{}")
+        try:
+            payload = json.loads(payload_raw)
+            title = payload.get("title", title)
+            urls = payload.get("urls", [])
+            cover_b64 = payload.get("cover_b64")
+        except json.JSONDecodeError:
+            print("⚠️ Warning: Invalid JSON in CLIENT_PAYLOAD")
+
+    # If still no URLs provided, exit cleanly with error message
+    if not urls:
+        print("❌ Error: No URLs provided.")
+        print("Usage (CLI): python main.py <url1> <url2> ...")
+        print("Usage (Payload): Set CLIENT_PAYLOAD environment variable with 'urls' array.")
+        sys.exit(1)
 
     build_epub(title, urls, cover_b64)
